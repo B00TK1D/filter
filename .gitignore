@@ -1,0 +1,9 @@
+# Build artifacts
+/proxyd
+*.exe
+*.test
+*.out
+
+# Local runtime data
+*.log
+*/ca/

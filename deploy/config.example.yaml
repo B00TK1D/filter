@@ -1,0 +1,100 @@
+# proxyd example configuration
+#
+# Copy to /etc/proxyd/config.yaml and adjust for your network.
+
+# --- DNS forwarder -----------------------------------------------------------
+dns:
+  # Addresses the DNS server listens on (UDP and TCP).
+  listen_udp: "0.0.0.0:53"
+  listen_tcp: "0.0.0.0:53"
+
+  # Resolvers used for outbound queries. These MUST bypass the interception
+  # rules (dedicated resolver, packet mark, or non-intercepted path) or
+  # forwarding will loop.
+  upstream:
+    - "1.1.1.1:53"
+    - "9.9.9.9:53"
+
+  # Addresses handed to clients for A / AAAA queries so traffic lands on the
+  # proxy. Set ipv6_enabled only when the proxy actually listens on IPv6 and
+  # the firewall and routing are verified.
+  intercept_ipv4: "10.10.0.1"
+  intercept_ipv6: "fd10:10::1"
+  ipv6_enabled: false
+
+  # Blocked-name behaviour: "nxdomain" (default) or "sinkhole". Sinkhole
+  # requires at least one sinkhole address.
+  block_mode: "nxdomain"
+  sinkhole_ipv4: "0.0.0.0"
+  sinkhole_ipv6: "::"
+
+  ttl: 60
+  timeout: "3s"
+  query_timeout: "5s"
+  max_udp_size: 1232
+
+# --- Transparent HTTP / HTTPS listeners --------------------------------------
+# The OS firewall must redirect TCP/80 and TCP/443 to these ports.
+http:
+  listen: "0.0.0.0:8080"
+https:
+  listen: "0.0.0.0:8443"
+  # Protocols advertised to intercepted clients.
+  alpn: ["h2", "http/1.1"]
+
+# --- Policy ------------------------------------------------------------------
+policy:
+  blocklist: "/etc/proxyd/blocklist.txt"
+  allowlist: ""                 # optional; takes precedence over the blocklist
+  reload_interval: "0s"         # 0 disables polling (SIGHUP still reloads)
+
+# --- Root CA and leaf certificates -------------------------------------------
+ca:
+  data_dir: "/var/lib/proxyd"
+  cert_file: ""                 # defaults to <data_dir>/rootCA.pem
+  key_file: ""                  # defaults to <data_dir>/rootCA-key.pem
+  validity: "8760h"             # root CA lifetime (1 year)
+  leaf_validity: "720h"         # leaf certificate lifetime (30 days)
+  leaf_cache_size: 1024
+  regenerate: false             # DEVELOPMENT ONLY; never enable in production
+
+# --- Logging ----------------------------------------------------------------
+logging:
+  level: "info"                 # debug | info | warn | error
+  format: "json"                # json | text
+  output: ""                    # "" = stdout, or a file path
+  log_urls: false               # log full paths/query strings (may contain secrets)
+  privacy_mode: false           # hostname-only logging
+
+# --- TLS interception behaviour ----------------------------------------------
+tls:
+  # "reject" (default) closes connections without usable SNI.
+  # "passthrough" relays them uninspected to the original destination; it can
+  # NOT enforce domain policy and only works when a real destination is known.
+  unknown_sni: "reject"
+
+# --- Resource limits ---------------------------------------------------------
+limits:
+  max_conns: 1024
+  max_header_bytes: 65536
+  read_header_timeout: "10s"
+  idle_timeout: "90s"
+  dial_timeout: "10s"
+  tls_handshake_timeout: "10s"
+  response_header_timeout: "30s"
+  shutdown_timeout: "15s"
+  # SO_MARK applied to proxy-originated sockets so the firewall can bypass
+  # interception for them. Keep in sync with the nftables scripts.
+  upstream_mark: 1
+
+# --- QUIC / HTTP/3 -----------------------------------------------------------
+# Enforcement happens in the firewall scripts; this value documents and drives
+# the behaviour. One of "allow", "reject", or "drop".
+udp443:
+  mode: "reject"
+
+# --- Management / health -----------------------------------------------------
+management:
+  listen: "127.0.0.1:9090"
+  # Setting allow_non_loopback exposes /healthz and /readyz beyond loopback.
+  allow_non_loopback: false

@@ -1,0 +1,50 @@
+# proxyd systemd unit
+#
+# Install:
+#   install -m 0644 deploy/proxyd.service /etc/systemd/system/proxyd.service
+#   useradd -r -s /usr/sbin/nologin -d /var/lib/proxyd proxyd
+#   install -d -o proxyd -g proxyd -m 0700 /var/lib/proxyd
+#   install -m 0644 deploy/config.example.yaml /etc/proxyd/config.yaml
+#   systemctl daemon-reload
+#   systemctl enable --now proxyd
+#
+# Apply the interception rules (must be installed by an admin, not the service):
+#   HTTP_PORT=8080 HTTPS_PORT=8443 deploy/nftables-setup.sh
+#
+# Remove them again with:  deploy/nftables-teardown.sh
+#
+# Capabilities:
+#   CAP_NET_BIND_SERVICE lets proxyd bind privileged ports (e.g. :53, :80).
+#   If limits.upstream_mark is non-zero, add CAP_NET_ADMIN (marking sockets
+#   is a privileged operation): uncomment the line below.
+
+[Unit]
+Description=proxyd transparent DNS + HTTP(S) filtering proxy
+Documentation=file:///etc/proxyd/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proxyd
+Group=proxyd
+ExecStart=/usr/local/bin/proxyd -config /etc/proxyd/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3s
+# For use with limits.upstream_mark: 
+# AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/proxyd /var/log/proxyd
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=proxyd
+
+[Install]
+WantedBy=multi-user.target
