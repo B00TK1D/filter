@@ -1,0 +1,11 @@
+# proxyd blocklist — one domain per line.
+#
+# Blank lines and lines starting with '#' are ignored. Hosts-file lines such as
+# "0.0.0.0 ads.example" are also accepted. A domain matches itself and its
+# subdomains (example.com matches *.example.com), but not lookalikes.
+#
+# Add your domains below, then reload:
+#   docker compose kill -s HUP proxyd
+
+# ads.example
+# tracker.example

@@ -1,0 +1,89 @@
+# proxyd configuration for container deployment.
+#
+# Mounted at /etc/proxyd/config.yaml by docker-compose.yml. Edits to this file
+# require a container restart (configuration is read once at startup); edits to
+# blocklist.txt are picked up with `docker compose kill -s HUP proxyd`.
+
+dns:
+  # Listen on all interfaces so host-networked clients can reach :53.
+  listen_udp: "0.0.0.0:53"
+  listen_tcp: "0.0.0.0:53"
+
+  # IMPORTANT: these resolvers must bypass the host's interception rules or
+  # forwarding will loop. Either use a resolver on a non-redirected path or
+  # keep limits.upstream_mark below in sync with MARK in nftables-setup.sh.
+  upstream:
+    - "1.1.1.1:53"
+    - "9.9.9.9:53"
+
+  # Address handed to clients for A/AAAA queries. With host networking this
+  # MUST be an address clients can reach the Docker host on (a LAN IP), NOT a
+  # container-internal address. Change 10.10.0.1 to your gateway/proxy IP.
+  intercept_ipv4: "10.10.0.1"
+  intercept_ipv6: "fd10:10::1"
+  ipv6_enabled: false
+
+  block_mode: "nxdomain"
+  sinkhole_ipv4: "0.0.0.0"
+  sinkhole_ipv6: "::"
+
+  ttl: 60
+  timeout: "3s"
+  query_timeout: "5s"
+  max_udp_size: 1232
+
+# The host firewall redirects TCP/80 and TCP/443 to these ports. With host
+# networking they are the host's ports; keep them in sync with HTTP_PORT and
+# HTTPS_PORT in deploy/nftables-setup.sh.
+http:
+  listen: "0.0.0.0:8080"
+https:
+  listen: "0.0.0.0:8443"
+  alpn: ["h2", "http/1.1"]
+
+policy:
+  blocklist: "/etc/proxyd/blocklist.txt"
+  allowlist: ""                 # optional; takes precedence over the blocklist
+  reload_interval: "0s"         # 0 disables polling (SIGHUP still reloads)
+
+ca:
+  data_dir: "/var/lib/proxyd"
+  cert_file: ""
+  key_file: ""
+  validity: "8760h"
+  leaf_validity: "720h"
+  leaf_cache_size: 1024
+  regenerate: false             # DEVELOPMENT ONLY; never enable in production
+
+logging:
+  level: "info"
+  format: "json"
+  output: ""                    # "" = stdout (captured by `docker logs`)
+  log_urls: false
+  privacy_mode: false
+
+tls:
+  unknown_sni: "reject"
+
+limits:
+  max_conns: 1024
+  max_header_bytes: 65536
+  read_header_timeout: "10s"
+  idle_timeout: "90s"
+  dial_timeout: "10s"
+  tls_handshake_timeout: "10s"
+  response_header_timeout: "30s"
+  shutdown_timeout: "15s"
+  # SO_MARK for proxy-originated sockets so the host's firewall bypasses
+  # interception for them. Requires CAP_NET_ADMIN in the container and must
+  # match MARK in nftables-setup.sh. Set 0 if you use a resolver/UID bypass.
+  upstream_mark: 1
+
+udp443:
+  mode: "reject"
+
+management:
+  # Loopback so the endpoint stays inside the container; the image HEALTHCHECK
+  # and `docker exec` can reach it. Set allow_non_loopback to expose it.
+  listen: "127.0.0.1:9090"
+  allow_non_loopback: false

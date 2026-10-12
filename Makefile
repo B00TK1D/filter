@@ -3,10 +3,12 @@
 GO           ?= go
 BINARY       ?= proxyd
 PKG          ?= ./...
+IMAGE        ?= proxyd:latest
 VERSION      ?=
 LDFLAGS      := $(if $(VERSION),-X main.Version=$(VERSION),)
 
-.PHONY: all build test vet fmt fmt-check e2e race clean run
+.PHONY: all build test vet fmt fmt-check e2e race clean run \
+        docker-build docker-up docker-down
 
 all: build
 
@@ -46,3 +48,15 @@ run: build
 ## clean: remove build artifacts
 clean:
 	rm -f $(BINARY)
+
+## docker-build: build the container image (override VERSION and IMAGE)
+docker-build:
+	docker build $(if $(VERSION),--build-arg VERSION=$(VERSION),) -t $(IMAGE) .
+
+## docker-up: start proxyd with docker compose (builds if needed)
+docker-up:
+	docker compose up -d --build
+
+## docker-down: stop the docker compose deployment
+docker-down:
+	docker compose down

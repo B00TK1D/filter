@@ -40,6 +40,7 @@ from the HTTP `Host` header or the TLS SNI.
 - [Logging and privacy](#logging-and-privacy)
 - [Root CA and TLS interception](#root-ca-and-tls-interception)
 - [Deployment](#deployment)
+  - [Docker](#docker)
 - [Health endpoints](#health-endpoints)
 - [Testing](#testing)
 - [Acceptance criteria](#acceptance-criteria)
@@ -256,6 +257,30 @@ The [`deploy/`](deploy) directory contains:
 - [`nftables-teardown.sh`](deploy/nftables-teardown.sh) — removes them.
 - [`proxyd.service`](deploy/proxyd.service) — least-privilege systemd unit.
 
+### Docker
+
+A multi-stage `Dockerfile` and `docker-compose.yml` are provided. The image is a
+small Alpine runtime with a static binary, and the container runs with host
+networking so the host firewall redirects and `SO_MARK` bypass work as in a
+native install.
+
+```sh
+# 1. Edit deploy/docker/config.yaml (set dns.intercept_ipv4 to the host IP)
+#    and deploy/docker/blocklist.txt.
+docker compose up -d --build
+
+# 2. Install the host interception rules.
+sudo deploy/nftables-setup.sh
+
+docker compose logs -f
+docker compose kill -s HUP proxyd     # reload the blocklist
+```
+
+The container persists its root CA in the `proxyd-data` volume. Export it for
+clients with `docker compose cp proxyd:/var/lib/proxyd/rootCA.pem ./rootCA.pem`.
+See [docs/docker.md](docs/docker.md) for configuration, capabilities,
+loop-prevention, CA extraction, updates, and troubleshooting.
+
 ### Install as a service
 
 ```sh
@@ -349,6 +374,8 @@ See [`tests/README.md`](tests/README.md).
 
 - [docs/installation.md](docs/installation.md) — prerequisites, install,
   firewall setup and rollback, verification.
+- [docs/docker.md](docs/docker.md) — building and running the container,
+  firewall integration, CA extraction, and capabilities.
 - [docs/ca-trust.md](docs/ca-trust.md) — installing and managing the root CA.
 - [docs/limitations.md](docs/limitations.md) — DoH/DoT, QUIC/HTTP3, ECH,
   pinning, hard-coded IPs, and other guarantees `proxyd` does **not** make.
