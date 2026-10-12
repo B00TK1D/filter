@@ -30,14 +30,20 @@ RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
 FROM alpine:3.20
 
 # ca-certificates: verify upstream TLS. tzdata: correct log timestamps.
-# busybox wget (already present) backs the HEALTHCHECK below.
-RUN apk add --no-cache ca-certificates tzdata \
+# nftables+bash: install interception rules from the entrypoint. busybox wget
+# (already present) backs the HEALTHCHECK below.
+RUN apk add --no-cache ca-certificates tzdata nftables bash \
  && addgroup -S proxyd \
  && adduser -S -G proxyd -h /var/lib/proxyd -s /sbin/nologin proxyd \
  && install -d -o proxyd -g proxyd -m 0700 /var/lib/proxyd \
  && install -d -o proxyd -g proxyd -m 0755 /etc/proxyd
 
 COPY --from=build /out/proxyd /usr/local/bin/proxyd
+
+# Reuse the exact firewall scripts from a native install.
+COPY deploy/nftables-setup.sh deploy/nftables-teardown.sh /usr/local/lib/proxyd/
+COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/lib/proxyd/*.sh
 
 # Default config and an empty blocklist. docker-compose mounts over these.
 COPY deploy/config.example.yaml /etc/proxyd/config.yaml
@@ -49,14 +55,12 @@ EXPOSE 53/udp 53/tcp 8080 8443 9090
 # The root CA is persisted here; mount a volume to keep it across upgrades.
 VOLUME ["/var/lib/proxyd"]
 
-# The proxy binds the privileged DNS port (:53) and optionally marks
-# upstream sockets with SO_MARK (CAP_NET_ADMIN), so it runs as root inside
-# the container by default and the container uses host networking (see
-# docker-compose.yml). To run unprivileged instead, set `USER proxyd` and
-# grant /usr/local/bin/proxyd the needed file capabilities with setcap, then
-# add NET_BIND_SERVICE/NET_ADMIN to the container.
+# The entrypoint installs host interception rules (needs CAP_NET_ADMIN +
+# host networking), binds the privileged DNS port :53, and optionally marks
+# upstream sockets with SO_MARK, so it runs as root inside the container by
+# default. Set FIREWALL=0 to skip firewall management.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:9090/readyz || exit 1
 
-ENTRYPOINT ["/usr/local/bin/proxyd"]
-CMD ["-config", "/etc/proxyd/config.yaml"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/local/bin/proxyd", "-config", "/etc/proxyd/config.yaml"]

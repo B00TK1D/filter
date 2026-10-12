@@ -1,21 +1,40 @@
 # Docker deployment
 
 The repository ships a multi-stage `Dockerfile`, a `.dockerignore`, and a
-`docker-compose.yml` for simple deployment. The image is a small Alpine runtime
-with a static, CGO-free `proxyd` binary and CA roots for upstream TLS
-verification.
+`docker-compose.yml` that make `proxyd` self-contained: **the container installs
+its own interception rules** and needs **no host scripts**. You only run
+`docker compose up -d`; the container sets up the host firewall redirects,
+starts the proxy, and removes the rules again on shutdown.
 
-The container only runs the proxy. **The host firewall (nftables) still owns
-interception**: proxyd never modifies host firewall rules. Because the redirect
-rules and `SO_MARK` bypass operate in the host network namespace, the container
-runs with `network_mode: host`.
+## How it works
+
+The container runs with `network_mode: host`, so it shares the host network
+namespace, and with `CAP_NET_ADMIN`, which lets it edit the host's netfilter
+rules. On startup its entrypoint applies the same nftables rules as a native
+install (it reuses `deploy/nftables-setup.sh` verbatim, so there is one source
+of truth) and then runs `proxyd`. On `SIGTERM` it removes the rules again.
+
+- **Port forwards** are nftables `redirect` rules in the host's `nat` chains:
+  TCP/80 → `HTTP_PORT`, TCP/443 → `HTTPS_PORT`.
+- **Bypass** for proxy-originated upstream connections uses `SO_MARK`
+  (`limits.upstream_mark` ↔ `MARK`).
+- **DNS** is served directly on `:53`; clients use the Docker host as resolver.
+
+Because the container edits the host firewall, it needs `NET_ADMIN` and host
+networking; there are no host scripts to run.
 
 ## Prerequisites
 
-- Docker with the Compose plugin (or just Docker for `docker run`).
-- Root on the host to install the firewall rules.
+- Docker with the Compose plugin. The image bundles `nftables`, so the host does
+  not need the `nft` package installed.
+- **Rootful** Docker: rootless Docker cannot share the host network namespace or
+  install host firewall rules.
 - `deploy/docker/config.yaml` edited for your network (at minimum
   `dns.intercept_ipv4`), and `deploy/docker/blocklist.txt`.
+
+The container needs only `NET_ADMIN` (plus the default `NET_BIND_SERVICE`); it
+does **not** need `--privileged`. If your environment restricts capabilities
+further, `privileged: true` is a working fallback.
 
 ## Build
 
@@ -35,34 +54,58 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 ## Configure
 
-Two files in `deploy/docker/` are mounted read-only at `/etc/proxyd/`:
+Two files in `deploy/docker/` are mounted at `/etc/proxyd/`:
 
-- `config.yaml` — the service configuration. Set `dns.intercept_ipv4` to the
-  **host's LAN/gateway IP** clients can reach (not a container address), and
-  keep `http.listen`/`https.listen` in sync with `HTTP_PORT`/`HTTPS_PORT` in
-  the firewall script.
+- `config.yaml` — service configuration. Set `dns.intercept_ipv4` to the
+  **host's LAN/gateway IP** clients can reach, and keep `http.listen` /
+  `https.listen` / `limits.upstream_mark` / `udp443.mode` in sync with the
+  `environment:` values in `docker-compose.yml`.
 - `blocklist.txt` — one domain per line.
 
-Configuration is read at startup; changes need a restart. Blocklist changes are
-picked up live.
+The entrypoint is driven by environment variables (set in
+`docker-compose.yml`):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `FIREWALL` | `1` | `1` installs/removes the interception rules; `0` leaves the host firewall untouched |
+| `HTTP_PORT` | `8080` | Redirect target and `http.listen` port |
+| `HTTPS_PORT` | `8443` | Redirect target and `https.listen` port |
+| `MARK` | `1` | `SO_MARK` bypass value (`limits.upstream_mark`) |
+| `BLOCK_DOT` | `yes` | Block outbound TCP/UDP 853 (DoT) |
+| `UDP443_MODE` | `reject` | `allow`, `drop`, or `reject` client UDP/443 (QUIC fallback) |
+| `BYPASS_UID` | *(empty)* | User whose traffic bypasses interception |
+
+If you change a port in `config.yaml`, change the matching environment variable
+too.
 
 ## Run
 
 ```sh
-# Start the proxy (host networking, restart on failure).
-docker compose up -d
-
-# Install the host interception rules.
-sudo deploy/nftables-setup.sh
-
-# ...or override the firewall ports to match a custom config:
-sudo HTTP_PORT=8080 HTTPS_PORT=8443 MARK=1 UDP443_MODE=reject deploy/nftables-setup.sh
+docker compose up -d --build
 ```
 
-`docker-compose.yml` grants `NET_ADMIN` so `limits.upstream_mark` (`SO_MARK`)
-works and `NET_BIND_SERVICE` so the container can bind `:53`. If you use a
-resolver- or UID-based loop-prevention instead, remove `NET_ADMIN` and set
-`limits.upstream_mark: 0`.
+That is the entire deployment: the container installs the redirect/block rules
+on the host, starts proxyd, and reports healthy. Nothing else runs on the host.
+
+## Firewall lifecycle
+
+- **Start:** the entrypoint removes any stale `proxyd-nat`/`proxyd-filter`
+  tables, installs fresh rules, then starts proxyd. If it cannot manage the
+  firewall (missing `NET_ADMIN` or not host-networked) it fails loudly instead
+  of running without interception.
+- **Stop** (`docker compose down`, `docker stop`): proxyd receives `SIGTERM`,
+  shuts down gracefully (up to `stop_grace_period: 30s`), and the entrypoint
+  removes the rules.
+- **Hard kill**: `docker kill` (SIGKILL) cannot run cleanup. Remove stale tables
+  with:
+
+```sh
+docker run --rm --network host --cap-add NET_ADMIN \
+  --entrypoint bash proxyd:latest /usr/local/lib/proxyd/nftables-teardown.sh
+```
+
+To run proxyd **without** any firewall management (for example when another
+component owns interception), set `FIREWALL: "0"`.
 
 ## Verify
 
@@ -74,6 +117,9 @@ docker compose logs -f
 # Health endpoints (loopback inside the container by default).
 docker exec proxyd wget -qO- http://127.0.0.1:9090/healthz
 docker exec proxyd wget -qO- http://127.0.0.1:9090/readyz
+
+# Confirm the host rules are installed.
+sudo nft list tables | grep proxyd
 
 # From a client using the host as its resolver:
 dig +short example.com          # -> dns.intercept_ipv4
@@ -102,33 +148,33 @@ Then follow [ca-trust.md](ca-trust.md). Never copy `rootCA-key.pem`.
 | Follow logs (JSON) | `docker compose logs -f` |
 | Reload the blocklist (`SIGHUP`) | `docker compose kill -s HUP proxyd` |
 | Restart after a config change | `docker compose restart proxyd` |
-| Stop | `docker compose down` |
-| Rollback firewall rules | `sudo deploy/nftables-teardown.sh` |
+| Stop (removes firewall rules) | `docker compose down` |
+
+`docker compose kill -s HUP` signals proxyd directly; the entrypoint is not
+involved, so the firewall rules stay installed.
 
 ## Loop prevention
 
-Upstream connections must not re-enter interception. The default config uses
-`limits.upstream_mark: 1`, and the setup script installs
-`meta mark 1 accept` bypass rules. Keep the two in sync. Alternatives:
+Upstream connections must not re-enter interception. The default uses
+`limits.upstream_mark: 1`; the entrypoint installs `meta mark 1 accept` bypass
+rules. Keep the two in sync, and keep `NET_ADMIN` so `SO_MARK` works.
+Alternatives: resolve through a non-redirected path, or set `BYPASS_UID` to a
+dedicated upstream owner.
 
-- Resolve through an upstream reachable on a non-redirected path.
-- Use `BYPASS_UID=...` in the setup script for a dedicated upstream owner.
+## Without host networking
 
-If `upstream_mark` is non-zero the container needs `NET_ADMIN` (already in
-`docker-compose.yml`).
+For a smoke test you can run the proxy without interception. Set
+`FIREWALL=0`, use bridge networking, and map the ports you want (the management
+endpoint stays on container loopback):
 
-## Bridge-networking alternative (testing only)
+```sh
+docker run --rm -e FIREWALL=0 -p 5353:53/udp -p 5353:53/tcp \
+  -p 8080:8080 -p 8443:8443 \
+  -v "$PWD/deploy/docker:/etc/proxyd" proxyd:latest
+```
 
-For a quick smoke test without touching the host network you can skip host
-networking, but interception will not work unless the host redirects to the
-published ports. In that case:
-
-- set `dns.listen_udp`/`listen_tcp` to `:5353` (an unprivileged port),
-- publish ports (`-p 53:5353/udp -p 53:5353/tcp -p 8080:8080 -p 8443:8443`),
-- and add a host DNS redirect from `:53` to `:5353`.
-
-This is documented only to make the difference explicit; the supported
-deployment is `network_mode: host`.
+Interception will not work in this mode; it is only for validating the proxy.
+The supported deployment is `network_mode: host` with `NET_ADMIN`.
 
 ## Updating proxyd
 
@@ -139,16 +185,16 @@ docker compose up -d
 ```
 
 The CA volume persists, so clients keep trusting the same root across upgrades.
+The container removes and reinstalls the firewall rules on restart.
 
 ## Security notes
 
-- The container runs as root inside the image to bind `:53` and to set
-  `SO_MARK`. It has no shell services, no SUID binaries beyond the base image,
-  and only the capabilities listed in `docker-compose.yml`. To run as the
-  non-root `proxyd` user, `setcap cap_net_bind_service,cap_net_admin+ep
-  /usr/local/bin/proxyd`, set `USER proxyd` in the image, and keep the caps in
-  `cap_add` (do not set `no-new-privileges`).
+- The container modifies the **host** firewall and runs as root inside the
+  image (needed for `:53`, `SO_MARK`, and nftables). It is granted only
+  `NET_ADMIN` and the default `NET_BIND_SERVICE` — it is **not** `--privileged`.
 - The management endpoint stays on container loopback. Set
   `management.allow_non_loopback: true` only with firewall restrictions.
 - `rootCA-key.pem` in the `proxyd-data` volume is a high-value secret. Protect
   the Docker host and the volume accordingly.
+- Anyone who can control this container effectively controls host firewall
+  policy; restrict Docker access to trusted administrators.
